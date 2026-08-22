@@ -89,11 +89,17 @@ internal enum PatchPriority
 // ── 其他 ───────────────────────────────────────────────────
 //   - 属性访问器：第 4 个位置参数 PropertyAccessor.Get/Set（目标名填属性名）：
 //     [SpectrePatch(typeof(scrConductor), "songposition_minusi", PatchType.Postfix, PropertyAccessor.Get)]
-//   - TryingCatch 默认 true：补丁体异常由共享 finalizer 吞掉并记录（无异常零开销）
+//   - 构造函数：目标名填 ".ctor"（实例构造器；多个时用 ParameterTypes 消歧，唯一则免写）
+//     或 ".cctor"（静态构造器，恒无参、至多一个）：
+//     [SpectrePatch(typeof(scrConductor), ".ctor", PatchType.Postfix)]
+//   - TryingCatch 默认 true：补丁体异常由共享 finalizer 吞掉并记录（无异常零开销），
+//     同一异常按窗口限流合并，持续异常窗口后打一行计数摘要
 //   - Feature：功能分组开关，取值用 FeatureKeys 常量；Main 里 SetFeatureToggle
 //     注册对应谓词，未注册的功能其补丁不应用并在日志告警。
 //     契约：谓词为假时补丁根本不挂载，拨开关同拍卸载——补丁体内**无需再查
-//     主开关**，体内检查只留给 Feature 之下的子选项
+//     主开关**，体内检查只留给 Feature 之下的子选项。
+//     多值：逗号或竖线分隔 = 任一开启即挂载（共享补丁不必宿主侧写 OR 谓词）：
+//     Feature = "ResultsPlus,CalibAdvice"
 // 字段经 attribute 命名参数赋值，编译器看不到赋值点
 #pragma warning disable CS0649
 /// <summary>
@@ -136,7 +142,8 @@ internal sealed class SpectrePatchAttribute : Attribute
     /// <summary>补丁体异常由共享 finalizer 吞掉并记录（默认 true，无异常零开销）。</summary>
     public bool TryingCatch = true;
 
-    /// <summary>功能分组开关（FeatureKeys 常量）。谓词为假时补丁不挂载，体内无需再查主开关。</summary>
+    /// <summary>功能分组开关（FeatureKeys 常量；多个用 "," 或 "|" 分隔，任一开启即挂载）。
+    /// 谓词为假时补丁不挂载，体内无需再查主开关。</summary>
     public string Feature;
 
     /// <summary>同方法多补丁时的执行顺序。同 mod 内排序用本字段；跨 mod 用 <see cref="Before"/>/<see cref="After"/>。</summary>

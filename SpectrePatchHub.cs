@@ -27,7 +27,8 @@ internal static class SpectrePatchHub
     private sealed class Spec
     {
         public string Id;           // "SpectrePatch:类.方法#序号"，同时是 Harmony owner id
-        public string Feature;      // null = 常开
+        public string Feature;      // 原始声明串（展示用）；null = 常开
+        public string[] FeatureParts; // 解析后的功能名（"A,B" → [A,B]），任一开启即挂载；null = 常开
         public MethodInfo PatchMethod;
         public SpectrePatchAttribute Attr;
         public MethodBase Target;   // null = 解析失败
@@ -45,7 +46,15 @@ internal static class SpectrePatchHub
     private static readonly HashSet<MethodBase> _guardedMethods = new();
     private static readonly HarmonyMethod _guardMethod
         = new(AccessTools.Method(typeof(SpectrePatchHub), nameof(Guard)));
-    private static readonly HashSet<string> _guardLogged = new();
+    // Guard 异常去重限流：key = 补丁@目标。同一异常窗口期内详报一次、重复只计数，
+    // 窗口过后仍在犯则合并成一行摘要；异常类型/消息一变立即重新详报——
+    // 每帧狂抛的补丁不会再刷爆日志，但持续故障和性质变化都看得见
+    private sealed class GuardStat
+    {
+        public DateTime WindowStart; public int Suppressed; public string Sig;
+    }
+    private static readonly Dictionary<string, GuardStat> _guardStats = new();
+    private const int GuardWindowSeconds = 30;
     // 未注册开关的功能名：只告警一次（ToggleOn 对未注册功能返回 false，补丁不应用）
     private static readonly HashSet<string> _warnedUnregistered = new();
     private static readonly object _lock = new();
@@ -87,7 +96,7 @@ internal static class SpectrePatchHub
         {
             _featureToggles.Clear();
             _guardedMethods.Clear();
-            _guardLogged.Clear();
+            _guardStats.Clear();
             _warnedUnregistered.Clear();
             _initialRefresh = true;
             int index = 0;
@@ -102,6 +111,7 @@ internal static class SpectrePatchHub
                         {
                             Id = "SpectrePatch:" + type.Name + "." + method.Name + "#" + (index++),
                             Feature = attr.Feature,
+                            FeatureParts = ParseFeatures(attr.Feature),
                             PatchMethod = method,
                             Attr = attr
                         };
@@ -134,18 +144,18 @@ internal static class SpectrePatchHub
             // 12 个谓词）；状态未翻转的补丁不触碰 Harmony——GUI 拨单个开关引发的
             // 全量刷新，实际作用于状态翻转的功能
             var toggleResults = new Dictionary<string, bool>();
+            // 本批发生过挂/卸的目标 → 执行链视图（Refresh 末尾统一打印）
+            var changedTargets = new Dictionary<MethodBase, string>();
             foreach (Spec spec in _specs)
             {
-                // 未注册开关的功能：补丁不会应用（ToggleOn=false），这里显式告警一次，
+                // 未注册开关的功能：补丁不会应用（ToggleOn=false），这里逐名显式告警一次，
                 // 否则错位的 Feature 字符串会表现为"探针就绪但功能没生效"的静默失败
-                if (spec.Error == null && spec.Feature != null
-                    && !_featureToggles.ContainsKey(spec.Feature)
-                    && _warnedUnregistered.Add(spec.Feature))
-                {
-                    AsyncLog.Warning("[" + LogTag + "] 功能 \"" + spec.Feature
-                        + "\" 未注册开关（宿主未调 SetFeatureToggle），相关补丁不会应用");
-                }
-                bool want = spec.Error == null && ToggleOnCached(spec.Feature, toggleResults);
+                if (spec.Error == null && spec.FeatureParts != null)
+                    foreach (string part in spec.FeatureParts)
+                        if (!_featureToggles.ContainsKey(part) && _warnedUnregistered.Add(part))
+                            AsyncLog.Warning("[" + LogTag + "] 功能 \"" + part
+                                + "\" 未注册开关（宿主未调 SetFeatureToggle），相关补丁不会应用");
+                bool want = spec.Error == null && ToggleOnCached(spec.Feature, spec.FeatureParts, toggleResults);
                 if (want && !spec.Applied)
                 {
                     Apply(spec);
@@ -155,6 +165,7 @@ internal static class SpectrePatchHub
                         AsyncLog.Info("[" + LogTag + "] + 挂载 " + spec.Id + " → " + spec.TargetName
                             + " (" + spec.Attr.PatchType
                             + (spec.Feature != null ? " · " + spec.Feature : "") + ")");
+                        changedTargets[spec.Target] = TargetLabel(spec.Target);
                     }
                 }
                 else if (!want && spec.Applied)
@@ -163,8 +174,15 @@ internal static class SpectrePatchHub
                     unapplied++;
                     AsyncLog.Info("[" + LogTag + "] - 卸载 " + spec.Id + " → " + spec.TargetName
                         + (spec.Feature != null ? " · " + spec.Feature : ""));
+                    changedTargets[spec.Target] = TargetLabel(spec.Target);
                 }
             }
+            // 执行链视图：本批变过的目标打印最终补丁链；首刷全体都算"变化"，
+            // 只报外部 mod 介入的目标（见 LogChain），之后批次全量打
+            bool firstBatch = _initialRefresh;
+            foreach (KeyValuePair<MethodBase, string> kv in changedTargets)
+                LogChain(kv.Key, kv.Value, firstBatch);
+
             int now = 0;
             foreach (Spec spec in _specs)
                 if (spec.Applied)
@@ -183,14 +201,15 @@ internal static class SpectrePatchHub
         }
     }
 
-    // ToggleOn 的按次缓存版本：同一次 Refresh 内每个功能只执行一次开关谓词
-    private static bool ToggleOnCached(string feature, Dictionary<string, bool> cache)
+    // ToggleOn 的按次缓存版本：同一次 Refresh 内每个功能表达式只求值一次；
+    // parts 为多值时任一开启即算开（OR）
+    private static bool ToggleOnCached(string raw, string[] parts, Dictionary<string, bool> cache)
     {
-        if (feature == null) return true;
-        if (!cache.TryGetValue(feature, out bool on))
+        if (parts == null || parts.Length == 0) return true;
+        if (!cache.TryGetValue(raw, out bool on))
         {
-            on = _featureToggles.TryGetValue(feature, out Func<bool> toggle) && toggle();
-            cache[feature] = on;
+            on = parts.Any(p => _featureToggles.TryGetValue(p, out Func<bool> t) && t());
+            cache[raw] = on;
         }
         return on;
     }
@@ -208,12 +227,15 @@ internal static class SpectrePatchHub
         }
     }
 
-    // 某功能当前是否可用（所有相关补丁解析/应用正常）。UI 可用来显示功能可用性
+    // 某功能当前是否可用（所有相关补丁解析/应用正常）。UI 可用来显示功能可用性；
+    // 多值 Feature 的 spec 只要含有该功能名即算相关
     public static bool IsAvailable(string feature)
     {
         lock (_lock)
         {
-            return _specs.Where(s => s.Feature == feature).All(s => s.Error == null);
+            return _specs.Where(s => s.FeatureParts == null || s.FeatureParts.Length == 0
+                    || s.FeatureParts.Contains(feature))
+                .All(s => s.Error == null);
         }
     }
 
@@ -291,10 +313,16 @@ internal static class SpectrePatchHub
                     .Select(n => Type.GetType(n, false) ?? AccessTools.TypeByName(n))
                     .ToArray();
 
-            if (name == ".ctor")
+            if (name == ".ctor" || name == ".cctor")
             {
+                // 构造函数：.ctor = 实例（多个时用 ParameterTypes 消歧，唯一则免写）；
+                // .cctor = 静态构造器（至多一个、恒无参）
+                bool isStatic = name == ".cctor";
                 ConstructorInfo[] ctors = type.GetConstructors(
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    (isStatic ? BindingFlags.Static : BindingFlags.Instance)
+                    | BindingFlags.Public | BindingFlags.NonPublic);
+                if (isStatic)
+                    return ctors.Length == 1 ? ctors[0] : null;
                 if (args != null)
                     return ctors.FirstOrDefault(c => SignatureMatches(c, args));
                 return ctors.Length == 1 ? ctors[0] : null;
@@ -452,11 +480,28 @@ internal static class SpectrePatchHub
                     if (!_guardedMethods.Contains(frameMethod)) continue;
                     string key = frameMethod.DeclaringType?.FullName + "." + frameMethod.Name
                         + "@" + __originalMethod.DeclaringType?.Name + "." + __originalMethod.Name;
-                    if (_guardLogged.Add(key))
+                    string sig = __exception.GetType().Name + ": " + __exception.Message;
+                    DateTime nowUtc = DateTime.UtcNow;
+                    if (!_guardStats.TryGetValue(key, out GuardStat stat) || stat.Sig != sig)
+                    {
+                        // 首次出现（或异常性质变了）：详报并开窗
+                        stat = new GuardStat { WindowStart = nowUtc, Suppressed = 0, Sig = sig };
+                        _guardStats[key] = stat;
                         AsyncLog.Warning("[" + LogTag + "] 补丁 " + frameMethod.DeclaringType?.FullName + "."
                             + frameMethod.Name + " 在 " + __originalMethod.DeclaringType?.Name + "."
                             + __originalMethod.Name + " 内抛出异常（已吞掉，功能可能退化，游戏版本不匹配？）: "
                             + __exception.GetType().Name + ": " + __exception.Message + "\n" + __exception.StackTrace);
+                    }
+                    else if ((nowUtc - stat.WindowStart).TotalSeconds >= GuardWindowSeconds)
+                    {
+                        // 窗口外仍在重复：一行合并摘要（含窗口内次数），重新开窗
+                        AsyncLog.Warning("[" + LogTag + "] 补丁 " + frameMethod.DeclaringType?.Name + "."
+                            + frameMethod.Name + " 在 " + __originalMethod.DeclaringType?.Name + "."
+                            + __originalMethod.Name + " 内异常持续（" + GuardWindowSeconds + "s 内重复 "
+                            + stat.Suppressed + " 次，已合并）: " + sig);
+                        stat.WindowStart = nowUtc; stat.Suppressed = 0;
+                    }
+                    else stat.Suppressed++;
                     return null;
                 }
             }
@@ -466,6 +511,62 @@ internal static class SpectrePatchHub
             // 比对失败时保守放行原异常
         }
         return __exception;
+    }
+
+    // —— 执行链视图 ————————————————————————————————————————
+
+    // Feature 串解析：',' 或 '|' 分隔、去空白；null/空串/全空 → null（常开）
+    private static string[] ParseFeatures(string feature)
+    {
+        if (string.IsNullOrEmpty(feature)) return null;
+        string[] parts = feature.Split(',', '|')
+            .Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
+        return parts.Length == 0 ? null : parts;
+    }
+
+    private static string TargetLabel(MethodBase m)
+        => (m.DeclaringType?.Name ?? "?") + "." + m.Name;
+
+    // 打印目标方法最终生效的补丁链——Harmony 排序后的真实顺序（Before/After 跨 mod
+    // 约束的结果就是它），其他 mod 打在同一方法上的补丁也在列，跨 mod 排序问题
+    // 一镜到底。owner 即 Harmony 实例 ID：本框架的形如 "SpectrePatch:类.方法#序号"，
+    // 别的 mod 是它们自己的 ID。
+    // foreignOnly=true 时只报存在外部补丁的目标：启动首刷全体 spec 都算"变化"，
+    // 全打太吵，跨 mod 介入才是重点；之后的批次（拨一次开关就几行）全量打
+    private static void LogChain(MethodBase target, string label, bool foreignOnly)
+    {
+        try
+        {
+            Patches info = Harmony.GetPatchInfo(target);
+            // 本环境 Harmony 的 Patches.* 是 Patch 列表（owner/priority 为公开字段）
+            List<Patch> pre = info?.Prefixes.ToList();
+            List<Patch> post = info?.Postfixes.ToList();
+            List<Patch> trans = info?.Transpilers.ToList();
+            List<Patch> fin = info?.Finalizers.ToList();
+            if (info == null || (pre.Count == 0 && post.Count == 0
+                && trans.Count == 0 && fin.Count == 0))
+            {
+                if (!foreignOnly)
+                    AsyncLog.Info("[" + LogTag + "] 链 " + label + ": 已无任何补丁");
+                return;
+            }
+            bool foreign = pre.Concat(post).Concat(trans).Concat(fin)
+                .Any(p => !p.owner.StartsWith("SpectrePatch:", StringComparison.Ordinal));
+            if (foreignOnly && !foreign) return;
+            string Desc(List<Patch> list)
+                => string.Join(" > ", list.Select(p => p.owner + "(" + p.priority + ")"));
+            string chain = (pre.Count > 0 ? Desc(pre) + " → " : "")
+                + "原方法"
+                + (post.Count > 0 ? " → " + Desc(post) : "")
+                + (trans.Count > 0 ? " · Transpiler[" + Desc(trans) + "]" : "")
+                + (fin.Count > 0 ? " · Finalizer[" + Desc(fin) + "]" : "");
+            AsyncLog.Info("[" + LogTag + "] 链 " + label + ": " + chain
+                + (foreign ? " ⚡外部mod介入" : ""));
+        }
+        catch
+        {
+            // 执行链视图只是诊断，失败不影响刷新本身
+        }
     }
 
     // —— 探针 ————————————————————————————————————————————
