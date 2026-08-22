@@ -49,6 +49,9 @@ internal static class SpectrePatchHub
     // 未注册开关的功能名：只告警一次（ToggleOn 对未注册功能返回 false，补丁不应用）
     private static readonly HashSet<string> _warnedUnregistered = new();
     private static readonly object _lock = new();
+    // Initialize 后的第一次 Refresh 汇总行用"首次应用"措辞（之后批次用"+n -n"），
+    // 挂/卸明细两种情况都逐条打印
+    private static bool _initialRefresh = true;
 
     // —— 宿主上下文（源码链接共享库）——————————————————————
     // 本文件被各宿主 mod 以 <Compile Include> 编进各自程序集，静态状态随宿主隔离；
@@ -79,12 +82,14 @@ internal static class SpectrePatchHub
     public static void Initialize(Assembly assembly)
     {
         UnpatchAll();
+        AsyncLog.Start();
         lock (_lock)
         {
             _featureToggles.Clear();
             _guardedMethods.Clear();
             _guardLogged.Clear();
             _warnedUnregistered.Clear();
+            _initialRefresh = true;
             int index = 0;
             foreach (Type type in assembly.GetTypes())
             {
@@ -119,11 +124,12 @@ internal static class SpectrePatchHub
         }
     }
 
-    // 按当前开关状态应用/卸载（宿主在选项变化时调用）
+    // 按当前开关状态应用/卸载（宿主在选项变化时调用）；挂/卸动作逐条记录 + 批次摘要
     public static void Refresh()
     {
         lock (_lock)
         {
+            int applied = 0, unapplied = 0;
             // 开关谓词按功能只求值一次（同功能的多个补丁共享结果，49 个 spec 只跑
             // 12 个谓词）；状态未翻转的补丁不触碰 Harmony——GUI 拨单个开关引发的
             // 全量刷新，实际作用于状态翻转的功能
@@ -136,14 +142,43 @@ internal static class SpectrePatchHub
                     && !_featureToggles.ContainsKey(spec.Feature)
                     && _warnedUnregistered.Add(spec.Feature))
                 {
-                    Debug.LogWarning("[" + LogTag + "] 功能 \"" + spec.Feature
+                    AsyncLog.Warning("[" + LogTag + "] 功能 \"" + spec.Feature
                         + "\" 未注册开关（宿主未调 SetFeatureToggle），相关补丁不会应用");
                 }
                 bool want = spec.Error == null && ToggleOnCached(spec.Feature, toggleResults);
                 if (want && !spec.Applied)
+                {
                     Apply(spec);
+                    if (spec.Applied)
+                    {
+                        applied++;
+                        AsyncLog.Info("[" + LogTag + "] + 挂载 " + spec.Id + " → " + spec.TargetName
+                            + " (" + spec.Attr.PatchType
+                            + (spec.Feature != null ? " · " + spec.Feature : "") + ")");
+                    }
+                }
                 else if (!want && spec.Applied)
+                {
                     Unapply(spec);
+                    unapplied++;
+                    AsyncLog.Info("[" + LogTag + "] - 卸载 " + spec.Id + " → " + spec.TargetName
+                        + (spec.Feature != null ? " · " + spec.Feature : ""));
+                }
+            }
+            int now = 0;
+            foreach (Spec spec in _specs)
+                if (spec.Applied)
+                    now++;
+            if (_initialRefresh)
+            {
+                AsyncLog.Info("[" + LogTag + "] 首次应用 " + now + "/" + _specs.Count
+                    + " 个补丁（其余为功能关闭或解析失败，失败明细见上方探针）");
+                _initialRefresh = false;
+            }
+            else if (applied > 0 || unapplied > 0)
+            {
+                AsyncLog.Info("[" + LogTag + "] 本批 +" + applied + " -" + unapplied
+                    + "，当前在挂 " + now + "/" + _specs.Count);
             }
         }
     }
@@ -162,6 +197,8 @@ internal static class SpectrePatchHub
 
     public static void UnpatchAll()
     {
+        // 停日志泵并同步清空队列：mod 关闭/重扫时已入队记录不丢
+        AsyncLog.Stop();
         lock (_lock)
         {
             foreach (Spec spec in _specs)
@@ -373,7 +410,7 @@ internal static class SpectrePatchHub
         catch (Exception ex)
         {
             spec.Error = "应用失败: " + ex.GetType().Name + ": " + ex.Message;
-            Debug.LogWarning("[" + LogTag + "] " + spec.Id + " → " + spec.Error);
+            AsyncLog.Warning("[" + LogTag + "] " + spec.Id + " → " + spec.Error);
         }
     }
 
@@ -386,7 +423,7 @@ internal static class SpectrePatchHub
         }
         catch (Exception ex)
         {
-            Debug.LogWarning("[" + LogTag + "] 卸载失败 " + spec.Id + ": " + ex.Message);
+            AsyncLog.Warning("[" + LogTag + "] 卸载失败 " + spec.Id + ": " + ex.Message);
         }
         spec.Applied = false;
     }
@@ -416,7 +453,7 @@ internal static class SpectrePatchHub
                     string key = frameMethod.DeclaringType?.FullName + "." + frameMethod.Name
                         + "@" + __originalMethod.DeclaringType?.Name + "." + __originalMethod.Name;
                     if (_guardLogged.Add(key))
-                        Debug.LogWarning("[" + LogTag + "] 补丁 " + frameMethod.DeclaringType?.FullName + "."
+                        AsyncLog.Warning("[" + LogTag + "] 补丁 " + frameMethod.DeclaringType?.FullName + "."
                             + frameMethod.Name + " 在 " + __originalMethod.DeclaringType?.Name + "."
                             + __originalMethod.Name + " 内抛出异常（已吞掉，功能可能退化，游戏版本不匹配？）: "
                             + __exception.GetType().Name + ": " + __exception.Message + "\n" + __exception.StackTrace);
@@ -443,12 +480,12 @@ internal static class SpectrePatchHub
             failed = _specs.Where(s => s.Error != null).ToList();
             ok = total - failed.Count;
         }
-        Debug.Log("[" + LogTag + "] SpectrePatch 探针: 游戏 r" + Release
+        AsyncLog.Info("[" + LogTag + "] SpectrePatch 探针: 游戏 r" + Release
             + "，已验证 r" + VerifiedBuild + "，" + ok + "/" + total + " 就绪");
         if (!Verified)
-            Debug.LogWarning("[" + LogTag + "] 当前游戏版本未验证（r" + Release
+            AsyncLog.Warning("[" + LogTag + "] 当前游戏版本未验证（r" + Release
                 + " ≠ r" + VerifiedBuild + "），如遇异常请反馈日志");
         foreach (Spec s in failed)
-            Debug.LogWarning("[" + LogTag + "]   ✗ " + s.Id + " → " + s.Error);
+            AsyncLog.Warning("[" + LogTag + "]   ✗ " + s.Id + " → " + s.Error);
     }
 }
