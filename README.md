@@ -1,21 +1,17 @@
 # SpectrePatch
 
-源码链接式共享补丁框架（attribute 声明 + 应用器 + 探针 + 异常兜底 + ADOFAI 版本探针）。
-**不产出独立 dll**——各宿主 mod 把本目录源码编进各自程序集，静态状态天然隔离，
+源码链接式共享补丁框架（attribute 声明 + 应用器 + 探针 + 异常日志泵 + ADOFAI 版本探针）。
+**不产出独立 dll**——各宿主 mod 把本仓库源码编进各自程序集，静态状态天然隔离，
 多 mod 同装互不干扰（对比独立 dll 分发的 LoadFrom 身份去重 / 静态串门问题）。
-
-包含：
-
-- `SpectrePatch.cs` / `SpectrePatchHub.cs` —— 补丁声明与应用器
-- `GameVersion.cs` —— ADOFAI releaseNumber 探针（`GameVersion.Release`，读取失败 = -1）
+源自 Spectre mod，通用化后独立成库（MIT）。
 
 ## 在宿主 mod 中接入
 
-1. **csproj 源码链接**（按仓库相对位置调整路径）：
+1. **把本仓库克隆到宿主仓库旁边**（兄弟目录），csproj 源码链接：
 
    ```xml
    <ItemGroup>
-     <Compile Include="..\Spectre\SpectrePatch\*.cs" Link="SpectrePatch\%(Filename)%(Extension)" />
+     <Compile Include="..\SpectrePatch\*.cs" Link="SpectrePatch\%(Filename)%(Extension)" />
    </ItemGroup>
    ```
 
