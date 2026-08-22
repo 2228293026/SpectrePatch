@@ -47,5 +47,6 @@ internal static bool Prefix(scrPlayer __instance) { ... }
 
 ## 依赖
 
-- 游戏自带 0Harmony（魔改版——Priority 常量为 Last=0/Normal=400/First=800，priority 未设默认 -1）
+- 0Harmony——由 UnityModManager（UMM）注入游戏目录的 `Managed/UnityModManager/`，是魔改版：Priority 常量为 Last=0/Normal=400/First=800（标准 Harmony 是 ±int.MaxValue），priority 未设默认 -1
 - UnityEngine（Debug 日志）
+- MelonLoader 宿主注意：Melon 自带标准 Harmony，上述常量值不同（见 `PatchPriority` 注释）

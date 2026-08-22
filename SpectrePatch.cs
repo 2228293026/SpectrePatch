@@ -27,7 +27,7 @@ internal enum PropertyAccessor
     Set,
 }
 
-// 优先级枚举：成员值即本作魔改 Harmony 的 Priority 常量（数值越大越先执行；
+// 优先级枚举：成员值即本环境（UMM 注入的魔改 Harmony）的 Priority 常量（数值越大越先执行；
 // 前缀从高到低跑，后缀反序——高优先级像洋葱外层）。None 是"不设置"哨兵，
 // 保持库默认 -1（垫底档，多个 -1 按挂载序）；Final = 要求绝对最后
 //（比一切常量都晚，给"看最终结果再收尾"的补丁用，如飘字剥残留）。
@@ -41,7 +41,7 @@ internal enum PatchPriority
     Last = 0,
     /// <summary>正常（=400）。默认档。</summary>
     Normal = 400,
-    /// <summary>最前（=800）。注意本作常量与标准 Harmony 的 ±int.MaxValue 不同，别照抄。</summary>
+    /// <summary>最前（=800）。注意 UMM 魔改 Harmony 的常量与标准版（±int.MaxValue）不同，别照抄。</summary>
     First = 800,
 }
 
