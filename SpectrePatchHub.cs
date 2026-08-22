@@ -21,8 +21,7 @@ namespace SpectrePatch;
 //     （try/catch 块空开销），常驻补丁链不多任何方法；
 //   - 探针和应用走同一个解析入口，不存在"探针说好、应用时挂"的分裂。
 //
-// 刷新节拍：PatchManager.RefreshPatches / ApplyAll 尾部调 Refresh()，
-// 与旧路径补丁同拍响应 Options 开关（Options.cs 无需改动）。
+// 刷新节拍：宿主在选项变化时调用 Refresh()，补丁随谓词结果即时挂/卸。
 internal static class SpectrePatchHub
 {
     private sealed class Spec
@@ -111,7 +110,7 @@ internal static class SpectrePatchHub
         LogProbe();
     }
 
-    // 功能开关注册：Feature 名 → 开关谓词（Main 里与 Options 绑定）
+    // 功能开关注册：Feature 名 → 开关谓词（宿主侧与自己的选项绑定）
     public static void SetFeatureToggle(string feature, Func<bool> toggle)
     {
         lock (_lock)
@@ -120,7 +119,7 @@ internal static class SpectrePatchHub
         }
     }
 
-    // 按当前开关状态应用/卸载（PatchManager.RefreshPatches 与 ApplyAll 尾部调用）
+    // 按当前开关状态应用/卸载（宿主在选项变化时调用）
     public static void Refresh()
     {
         lock (_lock)
@@ -138,7 +137,7 @@ internal static class SpectrePatchHub
                     && _warnedUnregistered.Add(spec.Feature))
                 {
                     Debug.LogWarning("[" + LogTag + "] 功能 \"" + spec.Feature
-                        + "\" 未注册开关（Main 里 SetFeatureToggle 缺失），相关补丁不会应用");
+                        + "\" 未注册开关（宿主未调 SetFeatureToggle），相关补丁不会应用");
                 }
                 bool want = spec.Error == null && ToggleOnCached(spec.Feature, toggleResults);
                 if (want && !spec.Applied)
@@ -172,7 +171,7 @@ internal static class SpectrePatchHub
         }
     }
 
-    // 某功能当前是否可用（所有相关补丁解析/应用正常）。UI 可用来显示"录像模式不可用"
+    // 某功能当前是否可用（所有相关补丁解析/应用正常）。UI 可用来显示功能可用性
     public static bool IsAvailable(string feature)
     {
         lock (_lock)
