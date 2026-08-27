@@ -142,6 +142,14 @@ internal static class SpectrePatchHub
         }
     }
 
+    // 总闸：false = 所有功能补丁一律视为关闭（宿主的"电源钮"）；未设置时恒为 true。
+    // 与逐功能谓词相乘，单独一个入口而不是让宿主包装每个 lambda
+    private static Func<bool> _master = () => true;
+    public static void SetMasterToggle(Func<bool> pred)
+    {
+        lock (_lock) _master = pred ?? (() => true);
+    }
+
     // —— 运行时手动挂载 ————————————————————————————
     // 目标在编译期不可描述（运行时反射才发现的类型/方法，如其他 mod 的）时用；
     // 与 attribute 补丁共用同一套应用/卸载/开关语义/异常兜底与执行链视图。
@@ -268,7 +276,8 @@ internal static class SpectrePatchHub
     // parts 多值时按 and 分隔语义求值——false = 任一开启（OR，默认），true = 全部开启（AND）
     private static bool ToggleOnCached(string raw, string[] parts, bool and, Dictionary<string, bool> cache)
     {
-        if (parts == null || parts.Length == 0) return true;
+        if (parts == null || parts.Length == 0) return _master();
+        if (!_master()) return false;
         if (!cache.TryGetValue(raw, out bool on))
         {
             on = and
