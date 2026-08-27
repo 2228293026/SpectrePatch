@@ -121,7 +121,8 @@ internal enum PatchPriority
 //     状态机的 MoveNext（优先读 StateMachineAttribute，老编译器退回嵌套类型名模式）：
 //     [SpectrePatch(typeof(scrController), "PlayCoroutine", PatchType.Prefix, PropertyAccessor.MoveNext)]
 //   - 全部重载：AllOverloads = true，同名重载挨个都挂（.ctor = 全部构造器）；
-//     消歧失败不再进探针放弃，适合"同名多重载、逻辑一样"的场景
+//     消歧失败不再进探针放弃，适合"同名多重载、逻辑一样"的场景：
+//     [SpectrePatch(typeof(scrFollower), "UpdatePosition", PatchType.Postfix, AllOverloads = true)]
 //   - 类型候选链：ClassNames = new[]{ "NewNs.NewName", "OldNs.OldName" }，
 //     与 MethodNames 对称，类型改名/搬命名空间的多版本兜底
 //

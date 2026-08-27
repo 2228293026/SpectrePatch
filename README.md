@@ -58,6 +58,10 @@ internal static bool Prefix(scrPlayer __instance) { ... }
 [SpectrePatch(typeof(scrController), "PlayCoroutine", PatchType.Prefix, PropertyAccessor.MoveNext)]
 internal static void MoveNextPrefix(object __instance) { ... }
 
+// 同名全部重载挨个都挂（.ctor = 全部构造器）；挂载日志/探针显示为 "类型.方法 ×N"
+[SpectrePatch(typeof(scrFollower), "UpdatePosition", PatchType.Postfix, AllOverloads = true)]
+internal static void UpdatePositionPostfix(object __instance) { ... }
+
 // 运行时才发现的目标：跳过 attribute 直接挂（id 幂等，UnpatchAll 后需重新注册）
 SpectrePatchHub.PatchManual(target, patch, PatchType.Postfix, "MyMod:dyn1", feature: "MyFeature");
 ```
