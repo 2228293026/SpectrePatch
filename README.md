@@ -8,10 +8,13 @@
 ## 能力
 
 - 方法级补丁声明：Prefix / Postfix / Transpiler / Finalizer，候选链多版本适配，版本区间门控
-- 目标种类：普通方法 / 属性访问器（`Accessor`）/ 实例构造器 `.ctor`（多构造器用 `ParameterTypes` 消歧）/ 静态构造器 `.cctor`
-- Feature 功能开关：谓词假 = 不挂载，拨开关同拍卸载；多值 `Feature = "A,B"` 任一开启即挂载
+- 目标种类：普通方法 / 属性访问器（`Accessor`）/ 事件 add/remove 访问器 / 实例构造器 `.ctor`（多构造器用 `ParameterTypes` 消歧，或 `AllOverloads` 全挂）/ 静态构造器 `.cctor` / **async/迭代器状态机 `MoveNext`**（优先读 `StateMachineAttribute`，老编译器退回嵌套类型名模式）
+- `AllOverloads = true`：同名全部重载挨个都挂，消歧失败不再放弃
+- 类型候选链 `ClassNames`：与 `MethodNames` 对称，类型改名/搬命名空间的多版本兜底
+- Feature 功能开关：谓词假 = 不挂载，拨开关同拍卸载；多值 `Feature = "A,B"` 任一开启即挂载（OR），`Feature = "A&B"` 全部开启才挂载（AND），两种分隔符不可混用
 - 执行链视图：刷新时打印目标方法最终生效的补丁链（Harmony 排序后的真实顺序，其他 mod 的补丁也在列）
-- 异常兜底与限流：补丁体异常吞掉并记录，同一异常按 30s 窗口合并计数（持续故障打一行摘要），异常性质变化立即重报
+- 异常兜底与限流：补丁体异常吞掉并记录，同一异常按 30s 窗口合并计数（持续故障打一行摘要），异常性质变化立即重报；`DisableAfterExceptions = N` 时窗口内累计达阈值**自动卸载该补丁**（宁缺毋滥，重新 Initialize 前不自动恢复）
+- 运行时手动挂载 `PatchManual`：目标编译期不可描述（运行时反射才发现的类型/方法，如其他 mod 的）时跳过 attribute 直接挂，共用同一套应用/卸载/开关/兜底管道
 - 探针（解析失败明细）、AsyncLog（不占主线程的日志泵）、ADOFAI 版本探针
 
 ## 在宿主 mod 中接入
@@ -50,6 +53,13 @@
 [SpectrePatch(typeof(scrPlayer), "Hit", PatchType.Prefix, Feature = "MyFeature",
     Priority = PatchPriority.First, After = new[] { "别的mod的HarmonyID" })]
 internal static bool Prefix(scrPlayer __instance) { ... }
+
+// async/迭代器方法：打编译器状态机的 MoveNext
+[SpectrePatch(typeof(scrController), "PlayCoroutine", PatchType.Prefix, PropertyAccessor.MoveNext)]
+internal static void MoveNextPrefix(object __instance) { ... }
+
+// 运行时才发现的目标：跳过 attribute 直接挂（id 幂等，UnpatchAll 后需重新注册）
+SpectrePatchHub.PatchManual(target, patch, PatchType.Postfix, "MyMod:dyn1", feature: "MyFeature");
 ```
 
 （完整用法见 `SpectrePatch.cs` 文件头的多版本剧本 / 参数限定注释块）

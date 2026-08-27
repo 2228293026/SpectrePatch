@@ -16,7 +16,8 @@ internal enum PatchType
     Finalizer,
 }
 
-/// <summary>属性访问器目标：属性的 get/set 在 IL 层是两个方法，补丁需指明打哪一个。</summary>
+/// <summary>成员访问器目标：目标成员在 IL 层可能拆成多个方法，补丁需指明打哪一个。
+/// 枚举名沿用历史 PropertyAccessor，语义已泛化为"成员访问器"。</summary>
 internal enum PropertyAccessor
 {
     /// <summary>普通方法（默认）。</summary>
@@ -25,6 +26,14 @@ internal enum PropertyAccessor
     Get,
     /// <summary>打属性的 setter。</summary>
     Set,
+    /// <summary>打事件的 add 访问器（目标名填事件名）。</summary>
+    EventAdd,
+    /// <summary>打事件的 remove 访问器（目标名填事件名）。</summary>
+    EventRemove,
+    /// <summary>打 async/迭代器方法的编译器状态机 MoveNext（目标名填方法名）。
+    /// 协程/async 的方法体不在原方法里——原方法只建状态机；要看每次推进的逻辑得打 MoveNext。
+    /// 解析优先读方法的 StateMachineAttribute，老编译器退回嵌套类型名 &lt;方法名&gt;d 模式。</summary>
+    MoveNext,
 }
 
 // 优先级枚举：成员值即本环境（UMM 注入的魔改 Harmony）的 Priority 常量（数值越大越先执行；
@@ -35,7 +44,9 @@ internal enum PatchPriority
 {
     /// <summary>不设置：保持 HarmonyMethod 库默认 -1（垫底档，多个 -1 按挂载序）。</summary>
     None = -1,
-    /// <summary>绝对最后：比一切常量都晚，给"看最终结果再收尾"的补丁用。</summary>
+    /// <summary>绝对最后：比一切常量都晚，给"看最终结果再收尾"的补丁用。
+    /// 枚举值只是常规域兜底；实际生效值由 Hub 运行时反射 HarmonyLib.Priority.Last
+    /// 动态下探一位（防 UMM 更换 ±int.MaxValue 常量域后 -1000000 不再垫底）。</summary>
     Final = -1000000,
     /// <summary>最后（=0）。</summary>
     Last = 0,
@@ -93,13 +104,31 @@ internal enum PatchPriority
 //     或 ".cctor"（静态构造器，恒无参、至多一个）：
 //     [SpectrePatch(typeof(scrConductor), ".ctor", PatchType.Postfix)]
 //   - TryingCatch 默认 true：补丁体异常由共享 finalizer 吞掉并记录（无异常零开销），
-//     同一异常按窗口限流合并，持续异常窗口后打一行计数摘要
+//     同一异常按窗口限流合并，持续异常窗口后打一行计数摘要；
+//     DisableAfterExceptions > 0 时窗口内累计达到阈值直接自动卸载该补丁
 //   - Feature：功能分组开关，取值用 FeatureKeys 常量；Main 里 SetFeatureToggle
 //     注册对应谓词，未注册的功能其补丁不应用并在日志告警。
 //     契约：谓词为假时补丁根本不挂载，拨开关同拍卸载——补丁体内**无需再查
 //     主开关**，体内检查只留给 Feature 之下的子选项。
-//     多值：逗号或竖线分隔 = 任一开启即挂载（共享补丁不必宿主侧写 OR 谓词）：
+//     多值：',' 或 '|' 分隔 = 任一开启即挂载（共享补丁不必宿主侧写 OR 谓词）：
 //     Feature = "ResultsPlus,CalibAdvice"
+//     '&' 分隔 = 全部开启才挂载（AND；与 ,/| 不可混用，混用进探针）：
+//     Feature = "HitErrorMeter&CustomJudge"
+//
+// ── 目标种类的其余入口 ─────────────────────────────────────
+//   - 事件访问器：Accessor 填 EventAdd/EventRemove，目标名填事件名
+//   - async/迭代器：Accessor 填 MoveNext，目标名填方法名——实际打编译器
+//     状态机的 MoveNext（优先读 StateMachineAttribute，老编译器退回嵌套类型名模式）：
+//     [SpectrePatch(typeof(scrController), "PlayCoroutine", PatchType.Prefix, PropertyAccessor.MoveNext)]
+//   - 全部重载：AllOverloads = true，同名重载挨个都挂（.ctor = 全部构造器）；
+//     消歧失败不再进探针放弃，适合"同名多重载、逻辑一样"的场景
+//   - 类型候选链：ClassNames = new[]{ "NewNs.NewName", "OldNs.OldName" }，
+//     与 MethodNames 对称，类型改名/搬命名空间的多版本兜底
+//
+// ── 运行时手动挂载 ─────────────────────────────────────────
+//   - 目标编译期不可描述（运行时反射才发现的类型/方法，如其他 mod 的）时，
+//     跳过 attribute 直接调 SpectrePatchHub.PatchManual(target, patch, type, id, ...)；
+//     与 attribute 补丁共用应用/卸载/开关/异常兜底与执行链视图
 // 字段经 attribute 命名参数赋值，编译器看不到赋值点
 #pragma warning disable CS0649
 /// <summary>
@@ -115,11 +144,18 @@ internal sealed class SpectrePatchAttribute : Attribute
     /// <summary>目标类型全名字符串（类型不便直引时用，如游戏私有/改名类型）。</summary>
     public string ClassName;
 
+    /// <summary>类型候选链：ClassName 未命中时依次尝试（类型改名/搬命名空间的多版本兜底，新名在前）。</summary>
+    public string[] ClassNames;
+
     /// <summary>目标方法/属性名（首选候选）。</summary>
     public string MethodName;
 
     /// <summary>候选链：MethodName 之后依次尝试（游戏改名的多版本兜底，新名在前）。</summary>
     public string[] MethodNames;
+
+    /// <summary>打在全部同名重载上（目标名填 .ctor 时 = 全部构造器）。默认 false：
+    /// 重载不唯一且消歧失败时进探针不挂。</summary>
+    public bool AllOverloads;
 
     /// <summary>注入方式，默认 Postfix。</summary>
     public PatchType PatchType = PatchType.Postfix;
@@ -136,11 +172,17 @@ internal sealed class SpectrePatchAttribute : Attribute
     /// <summary>目标参数类型精确匹配（编译期检查），用于重载消歧；可作第 4 个位置参数。</summary>
     public Type[] ParameterTypes;
 
-    /// <summary>属性访问器目标：None = 普通方法，Get/Set = 打属性的 getter/setter。</summary>
+    /// <summary>属性访问器目标：None = 普通方法；Get/Set = 属性访问器；EventAdd/EventRemove = 事件访问器；
+    /// MoveNext = async/迭代器方法的编译器状态机（目标名填方法名，实际打其状态机的 MoveNext）。</summary>
     public PropertyAccessor Accessor = PropertyAccessor.None;
 
     /// <summary>补丁体异常由共享 finalizer 吞掉并记录（默认 true，无异常零开销）。</summary>
     public bool TryingCatch = true;
+
+    /// <summary>TryingCatch 生效时，30s 窗口内异常累计达到该次数即自动卸载此补丁
+    ///（0 = 从不，默认）。适合"宁缺毋滥"的补丁：持续故障自我了断好过无限刷日志；
+    /// 卸载后重新 Initialize（mod 重启）前不会自动恢复。</summary>
+    public int DisableAfterExceptions;
 
     /// <summary>功能分组开关（FeatureKeys 常量；多个用 "," 或 "|" 分隔，任一开启即挂载）。
     /// 谓词为假时补丁不挂载，体内无需再查主开关。</summary>
