@@ -36,6 +36,7 @@ internal static class SpectrePatchHub
         public List<MethodBase> Targets; // 解析出的全部目标（AllOverloads 可多个）；null = 解析失败
         public string TargetName;   // 探针展示：命中候选的最终目标
         public string Error;        // 解析/应用失败原因；null = 正常
+        public bool VersionSkipped; // 版本门控跳过（MinVersion/MaxVersion 不匹配）：不算失败，IsAvailable 忽略
         public Harmony Owner;
         public bool Applied;
         public bool AutoDisabled;   // 异常达阈值自动卸载后置位：Refresh 不再重挂，重新 Initialize 才恢复
@@ -309,7 +310,7 @@ internal static class SpectrePatchHub
         {
             return _specs.Where(s => s.FeatureParts == null || s.FeatureParts.Length == 0
                     || s.FeatureParts.Contains(feature))
-                .All(s => s.Error == null);
+                .All(s => s.Error == null || s.VersionSkipped);
         }
     }
 
@@ -324,14 +325,25 @@ internal static class SpectrePatchHub
             int min = Math.Max(a.MinVersion, MinSupportedBuild);
             if (Release < min)
             {
+                spec.VersionSkipped = true;
                 spec.Error = "游戏 r" + Release + " 低于 MinVersion " + min;
                 return;
             }
             if (a.MaxVersion > 0 && Release > a.MaxVersion)
             {
+                spec.VersionSkipped = true;
                 spec.Error = "游戏 r" + Release + " 高于 MaxVersion " + a.MaxVersion + "（未验证）";
                 return;
             }
+        }
+        else if (a.MinVersion > 0 || a.MaxVersion > 0)
+        {
+            // 版本探测失败（Release == -1）时不能放行带版本分叉的补丁：
+            // 分叉对（MaxVersion = 149 / MinVersion = 150）会同时注册，两条目标名一存在一不存在，
+            // 不存在的那条会以 Error（而非 VersionSkipped）污染 IsAvailable。宁可整体不挂并显式告警
+            spec.VersionSkipped = true;
+            spec.Error = "游戏版本探测失败（Release == -1），已跳过带版本约束的补丁：r141–r149 与 r150+ 无法区分";
+            return;
         }
         Type type = a.ClassType;
         if (type == null && !string.IsNullOrEmpty(a.ClassName))
