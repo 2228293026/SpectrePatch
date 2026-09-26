@@ -663,13 +663,56 @@ internal static class SpectrePatchHub
                 spec.Error = "应用失败: " + string.Join("; ", failures)
                     + (done > 0 ? "（其余 " + done + " 个目标已挂）" : "");
                 AsyncLog.Warning("[" + LogTag + "] " + spec.Id + " → " + spec.Error);
+                RecordApplyFailure(spec.Id, spec.Error);
             }
         }
         catch (Exception ex)
         {
             spec.Error = "应用失败: " + ex.GetType().Name + ": " + ex.Message;
             AsyncLog.Warning("[" + LogTag + "] " + spec.Id + " → " + spec.Error);
+            RecordApplyFailure(spec.Id, spec.Error);
         }
+    }
+
+    // ── 挂载失败汇总（游戏内可见） ──────────────────────────
+    // 补丁挂不上 = 对应功能**静默消失**：用户改了设置却毫无反应，原因只在日志里。
+    // 键为 spec.Id：同一补丁反复失败（每次切设置都重试挂载）只记一次，
+    // 集合以补丁总数为上界，有界。
+    private static readonly List<string> ApplyFailures = new();
+    private static bool failureSummaryShown;
+
+    private static void RecordApplyFailure(string specId, string error)
+    {
+        lock (_lock)
+        {
+            if (ApplyFailures.Exists(x => x.StartsWith(specId + "|", StringComparison.Ordinal)))
+            {
+                return;
+            }
+            // Harmony 异常常带整段 IL，截断避免通知框爆版
+            string shortError = error != null && error.Length > 120 ? error.Substring(0, 120) + "…" : error;
+            ApplyFailures.Add(specId + "|" + shortError);
+        }
+    }
+
+    /// <summary>
+    /// 由宿主（Main）在启动完成后调用：若有补丁未能挂载，弹一次汇总提示。
+    /// 无失败时什么都不做（有失败也只提示一次，避免每次开关设置都打扰）。
+    /// </summary>
+    public static void ShowApplyFailureSummary()
+    {
+        List<string> snapshot;
+        lock (_lock)
+        {
+            if (failureSummaryShown || ApplyFailures.Count == 0) return;
+            failureSummaryShown = true;
+            snapshot = new List<string>(ApplyFailures);
+        }
+        AsyncLog.Warning("[" + LogTag + "] 合计 " + snapshot.Count + " 个补丁未能挂载（对应功能不会生效）："
+            + string.Join(" | ", snapshot));
+        Spectre.SpectreState.TriggerMessage(
+            "Spectre 有 " + snapshot.Count + " 个功能未能加载（游戏版本可能不兼容），详见日志",
+            8f, Spectre.SpectreState.NotifType.Warning);
     }
 
     private static void Unapply(Spec spec)
