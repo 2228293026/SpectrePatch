@@ -27,7 +27,7 @@ internal static class SpectrePatchHub
 {
     private sealed class Spec
     {
-        public string Id;           // "SpectrePatch:类.方法#序号"，同时是 Harmony owner id
+        public string Id;           // "宿主名:SpectrePatch:类.方法#序号"，同时是 Harmony owner id
         public string Feature;      // 原始声明串（展示用）；null = 常开
         public string[] FeatureParts; // 解析后的功能名（"A,B" → [A,B]），任一开启即挂载；null = 常开
         public bool FeatureAnd;     // Feature 用 & 分隔 = 全部开启才挂载（AND），默认 ,/| = 任一（OR）
@@ -79,6 +79,12 @@ internal static class SpectrePatchHub
     internal static bool Verified => Release == VerifiedBuild;
     // 日志前缀（宿主可改成自己的 mod 名）
     internal static string LogTag = "SpectrePatch";
+    // **宿主命名空间——patch owner id 的前缀**。
+    // 由 Initialize(assembly) 用宿主程序集名填入。
+    // 为什么用程序集名而不是 LogTag：LogTag 是可变的日志前缀，拿它当 id 会把
+    // "日志标签"与"身份标识"两件事耦合起来；程序集名编译期固定、天然跨 mod
+    // 唯一，也不依赖宿主记得额外传参。
+    private static string _ns = "SpectrePatch";
 
     internal static void Configure(System.Reflection.Assembly gameAssembly, int release,
         int minSupportedBuild, int verifiedBuild)
@@ -94,6 +100,12 @@ internal static class SpectrePatchHub
     // mod 开启时调用一次（可重复调用，重扫前先卸载）
     public static void Initialize(Assembly assembly)
     {
+
+        // 用宿主程序集名作 id 前缀。
+        // 放在这里（UnpatchAll 之前）而不是 Configure 里：Initialize 才是唯一
+        // 拿得到宿主程序集、且"先卸后装"的分界点；顺序本身不影响 UnpatchAll
+        // ——Unapply 用的是 spec.Id（当初挂载时已存好的完整 id），不重新推导。
+        _ns = assembly.GetName().Name;
         UnpatchAll();
         AsyncLog.Start();
         lock (_lock)
@@ -114,7 +126,7 @@ internal static class SpectrePatchHub
                         var expr = ParseFeatures(attr.Feature);
                         var spec = new Spec
                         {
-                            Id = "SpectrePatch:" + type.Name + "." + method.Name + "#" + (index++),
+                            Id = _ns + ":SpectrePatch:" + type.Name + "." + method.Name + "#" + (index++),
                             Feature = attr.Feature,
                             FeatureParts = expr?.Parts,
                             FeatureAnd = expr?.And ?? false,
@@ -154,7 +166,7 @@ internal static class SpectrePatchHub
     // —— 运行时手动挂载 ————————————————————————————
     // 目标在编译期不可描述（运行时反射才发现的类型/方法，如其他 mod 的）时用；
     // 与 attribute 补丁共用同一套应用/卸载/开关语义/异常兜底与执行链视图。
-    // id 需宿主保证唯一（日志与 Harmony owner 显示为 "SpectrePatch:manual:"+id），重复 id 幂等覆盖；
+    // id 需宿主保证唯一（日志与 Harmony owner 显示为 "宿主名:SpectrePatch:manual:"+id），重复 id 幂等覆盖；
     // feature 同 attribute 语义（null = 常开，","/"|" OR，"&" AND）。
     // 注意 UnpatchAll/Initialize 会清掉手动补丁，宿主需在 Initialize 后重新注册
     public static void PatchManual(MethodBase target, MethodInfo patchMethod, PatchType patchType, string id,
@@ -173,7 +185,7 @@ internal static class SpectrePatchHub
             TryingCatch = tryingCatch,
             DisableAfterExceptions = disableAfterExceptions,
         };
-        string fullId = "SpectrePatch:manual:" + id;
+        string fullId = _ns + ":SpectrePatch:manual:" + id;
         lock (_lock)
         {
             int existing = _specs.FindIndex(s => s.Id == fullId);
@@ -851,7 +863,7 @@ internal static class SpectrePatchHub
 
     // 打印目标方法最终生效的补丁链——Harmony 排序后的真实顺序（Before/After 跨 mod
     // 约束的结果就是它），其他 mod 打在同一方法上的补丁也在列，跨 mod 排序问题
-    // 一镜到底。owner 即 Harmony 实例 ID：本框架的形如 "SpectrePatch:类.方法#序号"，
+    // 一镜到底。owner 即 Harmony 实例 ID：本框架的形如 "宿主名:SpectrePatch:类.方法#序号"，
     // 别的 mod 是它们自己的 ID。
     // foreignOnly=true 时只报存在外部补丁的目标：启动首刷全体 spec 都算"变化"，
     // 全打太吵，跨 mod 介入才是重点；之后的批次（拨一次开关就几行）全量打
@@ -873,7 +885,7 @@ internal static class SpectrePatchHub
                 return;
             }
             bool foreign = pre.Concat(post).Concat(trans).Concat(fin)
-                .Any(p => !p.owner.StartsWith("SpectrePatch:", StringComparison.Ordinal));
+                .Any(p => !p.owner.StartsWith(_ns + ":SpectrePatch:", StringComparison.Ordinal));
             if (foreignOnly && !foreign) return;
             string Desc(List<Patch> list)
                 => string.Join(" > ", list.Select(p => p.owner + "(" + p.priority + ")"));
